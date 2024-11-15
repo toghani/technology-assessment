@@ -10,6 +10,7 @@ from nltk.corpus import stopwords
 import nltk
 from joblib import Parallel, delayed
 import multiprocessing
+from collections import Counter
 
 nltk.download('stopwords')
 nlp = spacy.load('en_core_web_sm')
@@ -17,6 +18,10 @@ nlp = spacy.load('en_core_web_sm')
 # Load and clean data
 df = pd.read_excel('./output_wos_file.xlsx', index_col=0)
 df = df.drop_duplicates(subset='Abstract', keep='first').reset_index(drop=True)
+df = df.drop_duplicates(subset='Title', keep='first').reset_index(drop=True)
+
+# Combine Title and Abstract columns
+df['combined_text'] = df['Title'] + '. ' + df['Abstract']
 
 # Extend stop words
 stop_words = stopwords.words('english')
@@ -72,8 +77,8 @@ stop_words.extend(['method', 'system', 'say', 'claim', 'wherein', 'device', 'app
                          'observe', 'outline', 'outlining', 'outlined', 'outline', 'present', 'presenting', 'presented',
                          'present', 'propose', 'proposing', 'proposed', 'propose', 'recognize', 'recognizing',
                          'recognized', 'recognize', 'show', 'showing', 'shown', 'show', 'speculate', 'speculating',
-                         'speculated', 'speculate', 'suggest', 'suggesting', 'suggested', 'suggest'])
-  # Keeping the original stop words here for brevity
+                         'speculated', 'speculate', 'suggest', 'suggesting', 'suggested', 'suggest', 'user', 'new'])
+
 
 # Precompile regex patterns for faster reuse
 email_pattern = re.compile(r'\S*@\S*\s?')
@@ -106,20 +111,31 @@ def safe_clean_text(text):
         return ''
     return clean_text(text)
 
-df['text'] = df['Abstract'].apply(safe_clean_text)
+df['text'] = df['combined_text'].apply(safe_clean_text)
 df['tokens'] = parallel_apply(tokenize, df['text'])
 
+# Step to remove low-frequency words
+def remove_low_frequency_words(df, threshold=0.10):
+    all_tokens = [token for tokens in df['tokens'] for token in tokens]
+    word_counts = Counter(all_tokens)
+    low_frequency_words = {word for word, count in word_counts.items() if count < threshold}
+    df['filtered_tokens'] = df['tokens'].apply(lambda tokens: [token for token in tokens if token not in low_frequency_words])
+    return df
+
+# Apply low-frequency word removal
+df = remove_low_frequency_words(df)
+
 # Bigrams and trigrams
-bigram = Phrases(df['tokens'], min_count=10, threshold=50)
+bigram = Phrases(df['filtered_tokens'], min_count=10, threshold=50)
 bigram_phraser = Phraser(bigram)
-trigram = Phrases(bigram_phraser[df['tokens']], min_count=10, threshold=50)
+trigram = Phrases(bigram_phraser[df['filtered_tokens']], min_count=10, threshold=50)
 trigram_phraser = Phraser(trigram)
 
 def apply_phraser(doc):
     return trigram_phraser[bigram_phraser[doc]]
 
 # Apply bigrams in parallel
-df['bigrams'] = parallel_apply(apply_phraser, df['tokens'])
+df['bigrams'] = parallel_apply(apply_phraser, df['filtered_tokens'])
 
 # Batch lemmatization with SpaCy
 def batch_lemmatize(texts, allowed_postags=['NOUN', 'VERB', 'ADJ', 'ADV']):
@@ -134,3 +150,5 @@ def stem(text):
     return [p.stem(token) for token in text]
 
 df['stemmed'] = parallel_apply(stem, df['lemmatized'])
+
+print("Done.")
